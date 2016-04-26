@@ -1,0 +1,339 @@
+#!/usr/bin/python
+# -*- coding:utf-8 -*-
+'''
+password_changer.py - A small, GTK based user password changer with modular structure
+Created on Nov 20, 2015
+
+@author: Hakan Bayindir
+@contact: hakan.bayindir@tubitak.gov.tr
+@license: GNU/GPLv3
+@version: 1.1b4
+'''
+
+# Primary imports
+import os
+import sys
+import pwd
+
+# Secondary imports
+import logging
+
+# We need kerberos for the actual password change.
+import kerberos
+
+# Non-standart import sequences
+import gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk
+
+# Logging settings
+LOG_FILE = None # Change to a string of full path to enable logging to file.
+MINIMUM_LOG_LEVEL = logging.ERROR # Possible values are {DEBUG, INFO, WARN, ERROR, CRITICAL}
+
+# This is the password change callback. Implement your password change method here.
+# Return True if everyhting is OK
+# Return False if something went bad.
+# Return an informative message string whether the case.
+# TODO: Move this to a subprocess in case it takes too long.
+def change_password(username, current_password, new_password):
+    password_changing_logger = logging.getLogger("change_password")
+    password_changing_logger.debug ("Changing password for " + username)
+
+    # This is the Kerberos password changing routine.
+    try:
+        kerberos.changePassword(username, current_password, new_password)
+    except kerberos.PwdChangeError as exception:
+        password_changing_logger.error("Password change failed: " + str(exception.args[0]).strip())
+
+        # This is a generic error message
+        error_message = "Sistem yöneticiniz ile iletişime geçin"
+
+        if str(exception.args[0]).strip() == 'Preauthentication failed':
+            error_message = "Mevcut parolanız hatalı"
+
+        elif str(exception.args[0][0]).strip() == 'Password change rejected:':
+            error_message = "Yeni parolanızın politikaya uygunluğunu kontrol edin"
+
+        elif str(exception.args[0]).strip() == 'Clients credentials have been revoked':
+            error_message = "Hesabınız kilitlidir"
+
+        return False, "Parolanız değiştirilemedi: " + error_message
+
+    return True, "Parolanız başarı ile değiştirildi"
+
+# This is our main password changing window.
+class Password_change_window(Gtk.Window):
+
+    def set_username_label(self, username = ""):
+        self.window_logger.debug("Setting username label text to " + username)
+        self.username_display_label.set_text(username)
+
+    # Below this point is for window & GTK related functions only.
+
+    # If you return FALSE in the "delete_event" signal handler,
+    # GTK will emit the "destroy" signal. Returning TRUE means
+    # you don't want the window to be destroyed.
+    # This is useful for popping up 'are you sure you want to quit?'
+    # type dialogs.
+    def delete_event(self, widget, event, data=None):
+        self.window_logger.debug("Window delete event received")
+
+        # During password change, exiting may be harmful.
+        # Block window closing and exiting from the application.
+        # disable_exit is defined in change_password_button_clicked
+        if self.disable_exit == True:
+            return True
+        else:
+            return False
+
+
+    # This callback implements what happens when we get a destroy signal
+    def destroy(self, widget, data=None):
+        self.window_logger.debug("Window destroy event received")
+        # Exit from the application.
+        Gtk.main_quit()
+
+    # Handle button events here
+
+    # Just close the window as usual if user cancels the operation.
+    def cancel_button_clicked(self, button):
+        self.window_logger.debug("Cancel button clicked")
+
+        # Run the delete_event function and if it receives false, continue with destroy.
+        if self.delete_event(button, "clicked", None) == False:
+            self.destroy(button, None)
+
+    # This function is called when change password button is changed.
+    # It just calls a change password function outside the class and gets the result and message
+    # Freezes everything including exit during change and thaws appropriate ones according to result
+    def password_change_button_clicked(self, button):
+        self.window_logger.debug("Change password button clicked")
+
+        # Disable exit, all buttons and change the status bar to inform the progress
+        self.disable_exit = True
+        self.status_bar_label.set_text("Parolanız değiştiriliyor, lütfen bekleyin")
+        self.cancel_button.set_sensitive(False)
+        self.change_password_button.set_sensitive(False)
+        self.current_password_entry.set_sensitive(False)
+        self.new_password_entry.set_sensitive(False)
+        self.new_password_again_entry.set_sensitive(False)
+
+        # Try to change the password
+        password_change_result, password_change_message = change_password(self.username_display_label.get_text(), self.current_password_entry.get_text(), self.new_password_entry.get_text())
+
+        self.disable_exit = False
+
+        # If everything is OK, change the exit button, enable it
+        # update the status bar.
+        if password_change_result == True:
+            self.status_bar_label.set_text(password_change_message)
+            self.cancel_button.set_sensitive(True)
+            self.cancel_button.set_label("Çıkış")
+        # If something went bad, report it, enable all fields and buttons.
+        else:
+            self.status_bar_label.set_text(password_change_message)
+            self.cancel_button.set_sensitive(True)
+            self.current_password_entry.set_sensitive(True)
+            self.new_password_entry.set_sensitive(True)
+            self.new_password_again_entry.set_sensitive(True)
+
+    # This function is called whenever a password field is changed.
+    # Initially, this function disables the change password button and sets the
+    # status bar text. When everything is OK, allows a change.
+    # Call this function once to initialize the box
+    def any_password_field_changed(self, widget, user_data = None):
+        self.window_logger.debug("A password entry field changed")
+
+        status_bar_text = ""
+        self.change_password_button.set_sensitive(False)
+
+        if len(self.current_password_entry.get_text()) == 0:
+            status_bar_text = "Lütfen mevcut parolanızı giriniz"
+        elif len(self.current_password_entry.get_text()) > 0 and len(self.new_password_entry.get_text()) == 0:
+            status_bar_text = "Lütfen yeni parolanızı giriniz"
+        elif len(self.current_password_entry.get_text()) > 0 and len(self.new_password_entry.get_text()) > 0:
+            if len(self.new_password_again_entry.get_text()) == 0:
+                status_bar_text = "Lütfen yeni parolanızı tekrar giriniz"
+            elif len(self.new_password_entry.get_text()) != len(self.new_password_again_entry.get_text()) or self.new_password_entry.get_text() != self.new_password_again_entry.get_text():
+                status_bar_text = "Yeni parolalar aynı değil"
+            else:
+                self.change_password_button.set_sensitive(True)
+                status_bar_text = "Parolanızı değiştirebilirsiniz"
+        self.status_bar_label.set_text(status_bar_text)
+
+    # This is the constructor of our class.
+    def __init__(self):
+        # Get a logger!
+        self.window_logger = logging.getLogger("Password_change_window")
+
+        # First, create a new window and set its title
+        self.window_logger.debug("Creating password changing window")
+        Gtk.Window.__init__(self, title="Parola Değiştirme Uygulaması")
+
+        # Set window border size
+        self.window_logger.debug("Setting border width")
+        self.set_border_width(10)
+
+        # Make it non-resizable (This also automatically resizes to tightest box)
+        self.window_logger.debug("Setting window as non-resizable")
+        self.set_resizable(False)
+
+        # Let's start with labels
+        self.window_logger.debug("Creating labels")
+        self.username_label           = Gtk.Label("Kullanıcı adı:")
+        self.current_password_label   = Gtk.Label("Mevcut parola:")
+        self.new_password_label       = Gtk.Label("Yeni parola:")
+        self.new_password_again_label = Gtk.Label("Yeni parola (tekrar):")
+
+        # Then continue with the fields.
+        self.window_logger.debug("Creating username display and password entry fields")
+        self.username_display_label   = Gtk.Label("")
+        self.current_password_entry   = Gtk.Entry()
+        self.new_password_entry       = Gtk.Entry()
+        self.new_password_again_entry = Gtk.Entry()
+
+        # Make password fields, well... password fields.
+        self.window_logger.debug("Making entries invisible on password fields")
+        self.current_password_entry.set_visibility(False)
+        self.new_password_entry.set_visibility(False)
+        self.new_password_again_entry.set_visibility(False)
+
+        # We need some buttons too.
+        self.window_logger.debug("Creating buttons")
+        self.change_password_button = Gtk.Button("Parola değiştir")
+        self.cancel_button = Gtk.Button("Vazgeç")
+
+        # And lastly, I need a status bar at the bottom (as a label)
+        self.window_logger.debug("Creating the status bar")
+        self.status_bar_label = Gtk.Label("")
+
+        # Let's start to fill our window with widgets!
+        self.window_logger.debug("Creating, configuring and adding grid manager")
+        grid_manager = Gtk.Grid()
+        grid_manager.set_row_spacing(4)
+        grid_manager.set_column_spacing(4)
+        self.add(grid_manager)
+
+        # Align the labels, so it looks nice.
+        self.window_logger.debug("Setting alignments of labels")
+        self.username_label.set_halign(Gtk.Align.START)
+        self.current_password_label.set_halign(Gtk.Align.START)
+        self.new_password_label.set_halign(Gtk.Align.START)
+        self.new_password_again_label.set_halign(Gtk.Align.START)
+
+        # Let's add the labels to the correct places in the box.
+        # A small note about attach function:
+        # attach(widget, left [column], top [row], width, height)
+        self.window_logger.debug("Attaching labels to the grid")
+        grid_manager.attach(self.username_label,                0, 0, 2, 1)
+        grid_manager.attach(self.current_password_label,        0, 1, 2, 1)
+        grid_manager.attach(self.new_password_label,            0, 2, 2, 1)
+        grid_manager.attach(self.new_password_again_label,      0, 3, 2, 1)
+
+        # Then continue with data display fields
+        self.window_logger.debug("Attaching data display labels to the grid")
+        grid_manager.attach(self.username_display_label,        2, 0, 3, 1)
+        grid_manager.attach(self.current_password_entry,        2, 1, 3, 1)
+        grid_manager.attach(self.new_password_entry,            2, 2, 3, 1)
+        grid_manager.attach(self.new_password_again_entry,      2, 3, 3, 1)
+
+        # Then attach the buttons too
+        self.window_logger.debug("Attaching buttons to the grid")
+        grid_manager.attach(self.cancel_button,                 1, 4, 1, 1)
+        grid_manager.attach(self.change_password_button,        3, 4, 1, 1)
+
+        # Lastly, create a status bar at the bottom
+        self.window_logger.debug("Attaching status bar to the grid")
+        grid_manager.attach(self.status_bar_label,              0, 5, 5, 1)
+
+        # Connecting entry field(s) events
+        self.window_logger.debug("Connecting entry fields events")
+        self.current_password_entry.connect("changed", self.any_password_field_changed)
+        self.new_password_entry.connect("changed", self.any_password_field_changed)
+        self.new_password_again_entry.connect("changed", self.any_password_field_changed)
+
+        # Connect button events
+        self.window_logger.debug("Connecting button events")
+        self.cancel_button.connect("clicked", self.cancel_button_clicked)
+        self.change_password_button.connect("clicked", self.password_change_button_clicked)
+
+        # When the window is given the "delete_event" signal (this is given
+        #by the window manager, usually by the "close" option, or on the
+        # titlebar), we ask it to call the delete_event () function
+        # as defined above. The data passed to the callback
+        # function is NULL and is ignored in the callback function.
+        self.window_logger.debug("Connecting delete event")
+        self.connect("delete_event", self.delete_event)
+
+        # Here we connect the "destroy" event to a signal handler.
+        # This event occurs when we call gtk_widget_destroy() on the window,
+        # or if we return FALSE in the "delete_event" callback.
+        self.window_logger.debug("Connecting destroy event")
+        self.connect("destroy", self.destroy)
+
+        # Call this function to initialize the password change box state.
+        self.window_logger.debug("Initializing window state")
+        self.any_password_field_changed(None, None)
+
+        # Center the window on the desktop
+        self.window_logger.debug("Centering window on the desktop")
+        self.set_position(Gtk.WindowPosition.CENTER)
+
+        # Last, show the window
+        self.window_logger.debug("All done, making window visible")
+        self.show_all()
+
+        # Allow exiting from program
+        self.disable_exit = False
+
+    def main(self):
+        # All PyGTK applications must have a gtk.main(). Control ends here
+        # and waits for an event to occur (like a key press or mouse event).
+        Gtk.main()
+
+if __name__ == '__main__':
+    # First step is to make the logger run.
+    try:
+        logging.basicConfig(filename=LOG_FILE, level=MINIMUM_LOG_LEVEL,
+                            format="[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s",
+                            datefmt="%Y-%m-%d %H:%M:%S")
+
+        # Get the local logger and start.
+        local_logger = logging.getLogger("main")
+
+        local_logger.debug("Logger setup completed.")
+        local_logger.debug("%s is starting.", sys.argv[0])
+    except IOError as exception:
+        print "Something about disk I/O went bad: " + str(exception)
+        sys.exit(1)
+
+    # Create the window
+    local_logger.debug("Creating password changer window")
+    password_change_window = Password_change_window()
+
+    # Set the username on the window
+    local_logger.debug("Setting username label")
+
+    # First, try to get directly
+    username = pwd.getpwuid(os.getuid()).pw_name
+
+    # Sometimes, username returns empty if gotten directly, this is just
+    # painting the grass green to be safe.
+    if len(username) == 0:
+        local_logger.debug("Username returned empty, parsing whole DB.")
+
+        # Get all users
+        for user in pwd.getpwall():
+            # Do a simple and expensive comparison.
+            if user.pw_uid == os.getuid():
+                username = user.pw_name
+                break # While I don't like it, I need to do this.
+
+        if len(username) == 0: # We failed to get the username
+            local_logger.critical("Cannot get username, hence cannot continue")
+            sys.exit(1)
+
+    password_change_window.set_username_label(username)
+
+    # Start the window and application
+    password_change_window.main()
