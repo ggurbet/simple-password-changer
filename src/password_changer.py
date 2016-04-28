@@ -18,8 +18,8 @@ import pwd
 # Secondary imports
 import logging
 
-# We need kerberos for the actual password change.
-import kerberos
+# We need pexpect to talk with passwd
+import pexpect
 
 # Non-standart import sequences
 import gi
@@ -46,8 +46,8 @@ def change_password(username, current_password, new_password):
     password_process = pexpect.spawn("env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 LANGUAGE=en_US.UTF-8 passwd")
 
     # Wait for preamble, send in old password.
+    # TODO: Add preamble for LDAP
     try:
-        # Decide whether we're talking with UNIX or pam backends.
         conversation_result = password_process.expect(["Changing password for " + username + "[.]$", "^Enter login\(LDAP\) password: $"], timeout=30)
         password_changing_logger.debug("Initial conversation returned %s", str(conversation_result))
 
@@ -74,7 +74,6 @@ def change_password(username, current_password, new_password):
             password_changing_logger.debug ("Sending in new password again")
             password_process.sendline(new_password)
 
-            # Let's see the result.
             conversation_result = password_process.expect(["^\r\npasswd: password updated successfully\r\n$", "^\r\nBad: new and old password are too similar\r\nEnter new UNIX password: $", "Bad: new password is too simple\r\nEnter new UNIX password: $"], timeout=30)
 
             if conversation_result == 0:
@@ -87,10 +86,9 @@ def change_password(username, current_password, new_password):
 
             elif conversation_result == 2:
                 password_changing_logger.error("Cannot change password: New password is too simple")
-                return False, "Parolanız değiştirilemedi: Yeni parolanız yeterince karmaşık değil."
+                return False, "Parolanız değiştirilemedi: Yeni parolanız çok basit."
 
         if conversation_result == 1:
-            # This is the LDAP password changing conversation.
             password_changing_logger.debug("Changing LDAP password")
             password_changing_logger.debug("Sending in current password")
             password_process.sendline(current_password)
@@ -130,7 +128,7 @@ def change_password(username, current_password, new_password):
             password_changing_logger.debug ("Sending in new password again")
             password_process.sendline(new_password)
 
-            conversation_result = password_process.expect(["^\r\nLDAP password information changed for " + username + "\r\npasswd: password updated successfully\r\n$", "\r\nPassword is in history of old passwords\r\n", "\r\nPassword fails quality checking policy\r\n", "\r\nLDAP password information update failed: Constraint violation\r\n"])
+            conversation_result = password_process.expect(["^\r\nLDAP password information changed for " + username + "\r\npasswd: password updated successfully\r\n$", "\r\nLDAP password information update failed: Constraint violation\r\nPassword is in history of old passwords\r\n", "\r\nPassword fails quality checking policy\r\n", "\r\nLDAP password information update failed: Constraint violation\r\n"])
 
             # We have successfully changed our password. Let's return!
             if conversation_result == 0:
@@ -144,7 +142,7 @@ def change_password(username, current_password, new_password):
                 password_changing_logger.error("Cannot change password: Password is used before and still in LDAP password history")
                 return False, "Parolanız değiştirilemedi: Daha önce kullanmadığınız bir parola belirlemeniz gerekiyor."
 
-            # Our new password is robust enough & LDAP server didn't allow this.
+            # Our new password is used before & LDAP server didn't allow this.
             if conversation_result == 2 or conversation_result == 3:
                 # No need to kill process, it's already exited at this point.
                 password_changing_logger.error("Cannot change password: Password fails quality checking policy")
