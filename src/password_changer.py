@@ -39,27 +39,125 @@ def change_password(username, current_password, new_password):
     password_changing_logger = logging.getLogger("change_password")
     password_changing_logger.debug ("Changing password for " + username)
 
-    # This is the Kerberos password changing routine.
+    # Will change password using python-pexpect because it helps us
+    # to build complex conversations and decision systems.
+    password_changing_logger.debug ("Spawning passwd process")
+    # Switch process environment to US English / UTF-8 to prevent messages from changing from system to system.
+    password_process = pexpect.spawn("env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 LANGUAGE=en_US.UTF-8 passwd")
+
+    # Wait for preamble, send in old password.
     try:
-        kerberos.changePassword(username, current_password, new_password)
-    except kerberos.PwdChangeError as exception:
-        password_changing_logger.error("Password change failed: " + str(exception.args[0]).strip())
+        # Decide whether we're talking with UNIX or pam backends.
+        conversation_result = password_process.expect(["Changing password for " + username + "[.]$", "^Enter login\(LDAP\) password: $"], timeout=30)
+        password_changing_logger.debug("Initial conversation returned %s", str(conversation_result))
 
-        # This is a generic error message
-        error_message = "Sistem yöneticiniz ile iletişime geçin"
+        # We are changing a UNIX local password
+        if conversation_result == 0:
+            conversation_result = password_process.expect("\r\n\(current\) UNIX password: $", timeout=30) # Just another check
+            password_changing_logger.debug("Changing UNIX / shadow password")
+            password_changing_logger.debug ("Sending in current password")
+            password_process.sendline(current_password)
 
-        if str(exception.args[0]).strip() == 'Preauthentication failed':
-            error_message = "Mevcut parolanız hatalı"
+            # Let's see whether we sent the correct password or not.
+            conversation_result = password_process.expect(["^\r\nEnter new UNIX password: $", "^\r\npasswd: Authentication service cannot retrieve authentication info\r\npasswd: password unchanged\r\n$", "^\r\npasswd: Authentication token manipulation error\r\npasswd: password unchanged\r\n$"], timeout=30)
 
-        elif str(exception.args[0][0]).strip() == 'Password change rejected:':
-            error_message = "Yeni parolanızın politikaya uygunluğunu kontrol edin"
+            # Handle the case for wrong current passwords.
+            if conversation_result == 1 or conversation_result == 2:
+                # Note: No need to kill process, it's already exited at this point.
+                password_changing_logger.error("Cannot change password: Current password is wrong")
+                return False, "Parolanız değiştirilemedi: Geçerli parolanız hatalı."
 
-        elif str(exception.args[0]).strip() == 'Clients credentials have been revoked':
-            error_message = "Hesabınız kilitlidir"
+            password_changing_logger.debug ("Current password is correct, sending in new password")
+            password_process.sendline(new_password)
 
-        return False, "Parolanız değiştirilemedi: " + error_message
+            conversation_result = password_process.expect(["^\r\nRetype new UNIX password: $"], timeout=30)
+            password_changing_logger.debug ("Sending in new password again")
+            password_process.sendline(new_password)
 
-    return True, "Parolanız başarı ile değiştirildi"
+            # Let's see the result.
+            conversation_result = password_process.expect(["^\r\npasswd: password updated successfully\r\n$", "^\r\nBad: new and old password are too similar\r\nEnter new UNIX password: $", "Bad: new password is too simple\r\nEnter new UNIX password: $"], timeout=30)
+
+            if conversation_result == 0:
+                password_changing_logger.info("Password is changed successfully")
+                return True, "Parolanız başarı ile değiştirildi."
+
+            elif conversation_result == 1:
+                password_changing_logger.error("Cannot change password: New and old passwords are too similar")
+                return False, "Parolanız değiştirilemedi: Yeni ve eski parolalarınız çok benzer."
+
+            elif conversation_result == 2:
+                password_changing_logger.error("Cannot change password: New password is too simple")
+                return False, "Parolanız değiştirilemedi: Yeni parolanız yeterince karmaşık değil."
+
+        if conversation_result == 1:
+            # This is the LDAP password changing conversation.
+            password_changing_logger.debug("Changing LDAP password")
+            password_changing_logger.debug("Sending in current password")
+            password_process.sendline(current_password)
+
+            conversation_result = password_process.expect(["^\r\nNew password: $", "^\r\nLDAP Password incorrect: try again\r\nEnter login\(LDAP\) password: $"], timeout=30)
+
+            # Our current password is wrong. So terminate the password process and return.
+            if conversation_result == 1:
+                # We need to kill process, it's waiting for new input at this point.
+                password_changing_logger.debug("Terminating password changing process.")
+                password_process.terminate()
+                password_changing_logger.error("Cannot change password: Current password is wrong")
+                return False, "Parolanız değiştirilemedi: Geçerli parolanız hatalı."
+
+            # Let's continue with the new password, everything seems good to go.
+            password_changing_logger.debug ("Current password is correct, sending in new password")
+            password_process.sendline(new_password)
+
+            conversation_result = password_process.expect(["^\r\nRe-enter new password: $", "\r\nPasswords must differ\r\nNew password: $",  "\r\nPassword too short\r\nNew password: $"], timeout=30)
+
+            # Our new password is same with the current & LDAP server didn't allow this. So terminate the password process and return.
+            if conversation_result == 1:
+                # We need to kill process, it's waiting for new input at this point.
+                password_changing_logger.debug("Terminating password changing process.")
+                password_process.terminate()
+                password_changing_logger.error("Cannot change password: Current and new passwords must be different")
+                return False, "Parolanız değiştirilemedi: Geçerli ve yeni parolanız aynı olamaz."
+
+            # Our new password is too short & LDAP server didn't allow this. So terminate the password process and return.
+            if conversation_result == 2:
+                # We need to kill process, it's waiting for new input at this point.
+                password_changing_logger.debug("Terminating password changing process.")
+                password_process.terminate()
+                password_changing_logger.error("Cannot change password: New password is too short")
+                return False, "Parolanız değiştirilemedi: Yeni parolanız çok kısa."
+
+            password_changing_logger.debug ("Sending in new password again")
+            password_process.sendline(new_password)
+
+            conversation_result = password_process.expect(["^\r\nLDAP password information changed for " + username + "\r\npasswd: password updated successfully\r\n$", "\r\nPassword is in history of old passwords\r\n", "\r\nPassword fails quality checking policy\r\n", "\r\nLDAP password information update failed: Constraint violation\r\n"])
+
+            # We have successfully changed our password. Let's return!
+            if conversation_result == 0:
+                # No need to kill process, it's already exited at this point.
+                password_changing_logger.debug("Password has changed successfully.")
+                return True, "Parolanız başarı ile değiştirildi."
+
+            # Our new password is used before & LDAP server didn't allow this.
+            if conversation_result == 1:
+                # No need to kill process, it's already exited at this point.
+                password_changing_logger.error("Cannot change password: Password is used before and still in LDAP password history")
+                return False, "Parolanız değiştirilemedi: Daha önce kullanmadığınız bir parola belirlemeniz gerekiyor."
+
+            # Our new password is robust enough & LDAP server didn't allow this.
+            if conversation_result == 2 or conversation_result == 3:
+                # No need to kill process, it's already exited at this point.
+                password_changing_logger.error("Cannot change password: Password fails quality checking policy")
+                return False, "Parolanız değiştirilemedi: Yeni parolanız karmaşıklık politikasına uygun değil."
+
+    # Handle the exceptions!
+    except pexpect.TIMEOUT as exception:
+        password_changing_logger.debug("A timeout exception occured: %s", exception)
+        return False, "Parolanız değiştirilemedi: Lütfen sistem yöneticiniz ile iletişime geçin."
+
+    except pexpect.EOF as exception:
+        password_changing_logger.debug("An EOF exception occured: %s", exception)
+        return False, "Parolanız değiştirilemedi: Lütfen sistem yöneticiniz ile iletişime geçin."
 
 # This is our main password changing window.
 class Password_change_window(Gtk.Window):
