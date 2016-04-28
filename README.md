@@ -7,6 +7,7 @@ Simple password changer enables users to change their passwords without using a 
 Following packages / libraries are required in order to run the program.
 
 - `python-2.7`: Since it's developed with it.
+- `python-pexpect`: Used to talk with `passwd` command with complex conversations.
 - `python-gi`: For the user interface.
 - `python-gi-cairo`: For the user interface.
 
