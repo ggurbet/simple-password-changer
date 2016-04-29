@@ -10,7 +10,8 @@ Following packages / libraries are required in order to run the program.
 - `python-pexpect`: Used to talk with `passwd` command with complex conversations.
 - `python-gi`: For the user interface.
 - `python-gi-cairo`: For the user interface.
-
+- `gir1.2-gtk-3.0`: For native rendering of UI.
+- **Important:** Tool requires `en_US-utf8` locale to be *installed*. It doesn't have to be the default but it should be available when one runs `locale -a`.
 
 ## Installation steps
 
@@ -22,9 +23,7 @@ This tool relies on `PAM` configuration of the host system. Correct configuratio
 
 ### File Locations
 
-**Important:** Please remove `.py` extensions from the files.
-
-- `password_changer.py`: `/usr/local/bin/password_changer` (Since it can be used by regular users and it's not installed by a package).
-- `password_changer.desktop`: `/usr/share/applications/password_changer.desktop` (To add the launcher to application menus).
+- `simple-password-changer`: `/usr/local/bin/simple-password-changer` (Since it can be used by regular users and it's not installed by a package).
+- `simple-password-changer.desktop`: `/usr/share/applications/simple-password-changer.desktop` (To add the launcher to application menus).
 
 Utility can be used after copying files. Menu update may require a logout/login.
